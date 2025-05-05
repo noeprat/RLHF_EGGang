@@ -1,5 +1,8 @@
+ipykernel
 heapdict
 matplotlib
 numpy
 scipy
 torch
+gym
+gym-notices
