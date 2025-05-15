@@ -4,13 +4,14 @@
 
 import gymnasium as gym
 import time
-
 import numpy as np
-import time
 import torch
 import torch.nn as nn
 
-from torch.distributions import MultivariateNormal
+from tqdm import tqdm
+from torch.distributions import MultivariateNormal, Categorical
+import random
+import matplotlib.pyplot as plt
 
 from models import ActorNetwork, CriticNetwork, RewardModel
 
@@ -41,21 +42,28 @@ class PPO:
 		
 		# Handle both discrete and continuous action spaces
 		if isinstance(env.action_space, gym.spaces.Discrete):
-			self.n_actions = env.action_space.n
-			self.act_dim = 1  # For discrete actions
+			self.action_dim = env.action_space.n
 		else:
-			self.n_actions = env.action_space.shape[0]  # For continuous actions
-			self.act_dim = env.action_space.shape[0]
+			self.action_dim = env.action_space.shape[0]  # For continuous actions
+		
+		# Set observation dimension from observation space
 		self.obs_dim = env.observation_space.shape[0]
 
 		# Initialize the actor, critic, and reward model
-		self.actor = ActorNetwork(self.n_actions, self.obs_dim, lr=self.lr)
-		self.critic = CriticNetwork(self.obs_dim, lr=self.lr)
-		self.reward_model = RewardModel(self.obs_dim, lr=self.lr)
-
+		self.actor = ActorNetwork(self.action_dim, self.obs_dim, alpha=self.lr)
+		self.critic = CriticNetwork(self.obs_dim, alpha=self.lr)
+		self.reward_model = RewardModel(self.obs_dim, alpha=self.lr)
+		
+		# Get the device from the actor network
+		self.device = self.actor.device
+		
 		# Initialize the covariance matrix used to query the actor for actions
-		self.cov_var = torch.full(size=(self.act_dim,), fill_value=0.5)
+		self.cov_var = torch.full(size=(self.action_dim,), fill_value=0.5).to(self.device)
 		self.cov_mat = torch.diag(self.cov_var)
+		
+		# Initialize optimizers
+		self.actor_optim = self.actor.optimizer
+		self.critic_optim = self.critic.optimizer
 
 		# This logger will help us with printing out summaries of each iteration
 		self.logger = {
@@ -81,13 +89,13 @@ class PPO:
 		print(f"{self.timesteps_per_batch} timesteps per batch for a total of {total_timesteps} timesteps")
 		t_so_far = 0 # Timesteps simulated so far
 		i_so_far = 0 # Iterations ran so far
-		while t_so_far < total_timesteps:                                                                       # ALG STEP 2
+		while t_so_far < total_timesteps:
 			# Train reward model if we have preference data
-			if len(self.preference_dataset.preferences) > 0:
-				self.train_reward_model()
+			#if len(self.preference_dataset.preferences) > 0:
+			#	self.train_reward_model()
 			
-			# Autobots, roll out (just kidding, we're collecting our batch simulations here)
-			batch_obs, batch_acts, batch_log_probs, batch_rtgs, batch_lens = self.rollout()                     # ALG STEP 3
+			# Collecting our batch simulations
+			batch_obs, batch_acts, batch_log_probs, batch_rtgs, batch_lens = self.rollout()
 
 			# Calculate how many timesteps we collected this batch
 			t_so_far += np.sum(batch_lens)
@@ -101,26 +109,17 @@ class PPO:
 
 			# Calculate advantage at k-th iteration
 			V, _ = self.evaluate(batch_obs, batch_acts)
-			A_k = batch_rtgs - V.detach()                                                                       # ALG STEP 5
+			A_k = batch_rtgs - V.detach()
 
-			# One of the only tricks I use that isn't in the pseudocode. Normalizing advantages
-			# isn't theoretically necessary, but in practice it decreases the variance of 
-			# our advantages and makes convergence much more stable and faster. I added this because
-			# solving some environments was too unstable without it.
+			# Normalizing advantages
 			A_k = (A_k - A_k.mean()) / (A_k.std() + 1e-10)
 
 			# This is the loop where we update our network for some n epochs
-			for _ in range(self.n_updates_per_iteration):                                                       # ALG STEP 6 & 7
+			for _ in range(self.n_updates_per_iteration):
 				# Calculate V_phi and pi_theta(a_t | s_t)
 				V, curr_log_probs = self.evaluate(batch_obs, batch_acts)
 
 				# Calculate the ratio pi_theta(a_t | s_t) / pi_theta_k(a_t | s_t)
-				# NOTE: we just subtract the logs, which is the same as
-				# dividing the values and then canceling the log with e^log.
-				# For why we use log probabilities instead of actual probabilities,
-				# here's a great explanation: 
-				# https://cs.stackexchange.com/questions/70518/why-do-we-use-the-log-in-gradient-based-reinforcement-algorithms
-				# TL;DR makes gradient ascent easier behind the scenes.
 				ratios = torch.exp(curr_log_probs - batch_log_probs)
 
 				# Calculate surrogate losses.
@@ -128,9 +127,6 @@ class PPO:
 				surr2 = torch.clamp(ratios, 1 - self.clip, 1 + self.clip) * A_k
 
 				# Calculate actor and critic losses.
-				# NOTE: we take the negative min of the surrogate losses because we're trying to maximize
-				# the performance function, but Adam minimizes the loss. So minimizing the negative
-				# performance function maximizes it.
 				actor_loss = (-torch.min(surr1, surr2)).mean()
 				critic_loss = nn.MSELoss()(V, batch_rtgs)
 
@@ -152,12 +148,13 @@ class PPO:
 
 			# Save our model if it's time
 			if i_so_far % self.save_freq == 0:
+				print("Saving model...")
 				torch.save(self.actor.state_dict(), './ppo_actor.pth')
 				torch.save(self.critic.state_dict(), './ppo_critic.pth')
 
 	def rollout(self):
 		"""
-			Too many transformers references, I'm sorry. This is where we collect the batch of data
+			This is where we collect the batch of data
 			from simulation. Since this is an on-policy algorithm, we'll need to collect a fresh batch
 			of data each time we iterate the actor/critic networks.
 
@@ -278,20 +275,24 @@ class PPO:
 				action - the action to take, as a numpy array
 				log_prob - the log probability of the selected action in the distribution
 		"""
-		# Query the actor network for a mean action
-		mean = self.actor(obs)
-
-		# Create a distribution with the mean action and std from the covariance matrix above.
-		dist = MultivariateNormal(mean, self.cov_mat)
-
-		# Sample an action from the distribution
-		action = dist.sample()
-
-		# Calculate the log probability for that action
-		log_prob = dist.log_prob(action)
-
-		# Return the sampled action and the log probability of that action in our distribution
-		return action.detach().numpy(), log_prob.detach()
+		# Convert observation to tensor and move to device
+		obs = torch.tensor(obs, dtype=torch.float).to(self.device)
+		
+		# Query the actor network for action probabilities
+		action_probs = self.actor(obs)
+		
+		if isinstance(self.env.action_space, gym.spaces.Discrete):
+			# For discrete action spaces
+			dist = Categorical(action_probs)
+			action = dist.sample()
+			log_prob = dist.log_prob(action)
+			return action.item(), log_prob.detach()
+		else:
+			# For continuous action spaces
+			dist = MultivariateNormal(action_probs, self.cov_mat)
+			action = dist.sample()
+			log_prob = dist.log_prob(action)
+			return action.detach().cpu().numpy(), log_prob.detach()
 
 	def evaluate(self, batch_obs, batch_acts):
 		"""
@@ -313,10 +314,16 @@ class PPO:
 		V = self.critic(batch_obs).squeeze()
 
 		# Calculate the log probabilities of batch actions using most recent actor network.
-		# This segment of code is similar to that in get_action()
-		mean = self.actor(batch_obs)
-		dist = MultivariateNormal(mean, self.cov_mat)
-		log_probs = dist.log_prob(batch_acts)
+		action_probs = self.actor(batch_obs)
+		
+		if isinstance(self.env.action_space, gym.spaces.Discrete):
+			# For discrete action spaces
+			dist = Categorical(action_probs)
+			log_probs = dist.log_prob(batch_acts)
+		else:
+			# For continuous action spaces
+			dist = MultivariateNormal(action_probs, self.cov_mat)
+			log_probs = dist.log_prob(batch_acts)
 
 		# Return the value vector V of each observation in the batch
 		# and log probabilities log_probs of each action in the batch
@@ -411,102 +418,11 @@ class PPO:
 		self.logger['batch_rews'] = []
 		self.logger['actor_losses'] = []
 
-	def train_reward_model(self, preference_data, n_epochs=10):
-		"""
-		Train the reward model using the preference dataset
-		"""
-		for epoch in range(n_epochs):
-			total_loss = 0
-			n_batches = 0
-			
-			for traj1, traj2, preference in preference_data:
-				self.reward_model.optimizer.zero_grad()
-				
-				# Calculate rewards for both trajectories
-				states1 = torch.tensor([s for s, _, _ in traj1], dtype=torch.float).to(self.reward_model.device)
-				states2 = torch.tensor([s for s, _, _ in traj2], dtype=torch.float).to(self.reward_model.device)
-				
-				# Get the reward for each trajectory
-				rewards1 = self.reward_model(states1).mean()
-				rewards2 = self.reward_model(states2).mean()
-				
-				# Calculate preference loss
-				logits = rewards1 - rewards2
-				target = torch.tensor([preference], dtype=torch.float).to(self.reward_model.device)
-				loss = nn.BCEWithLogitsLoss()(logits, target)
-				
-				loss.backward()
-				self.reward_model.optimizer.step()
-				total_loss += loss.item()
-			
-			print(f"Epoch {epoch+1}/{n_epochs}, Loss: {total_loss/len(preference_data)}")
-
-		def train_ppo_rlhf(env_name, preference_data_path, n_episodes=1000, n_seeds=3):
-    env = gym.make(env_name)
-    n_actions = env.action_space.n
-    input_dims = env.observation_space.shape[0]
-    
-    # Load preference data
-    with open(preference_data_path, 'rb') as f:
-        preference_data = pickle.load(f)
-    
-    all_rewards = []
-    
-    for seed in range(n_seeds):
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        
-        agent = PPOAgent(env)
-        episode_rewards = []
-        
-        # First train the reward model
-        agent.train_reward_model(preference_data)
-        
-        # Then train the policy using the learned reward model
-        for episode in tqdm(range(n_episodes)):
-            observation = env.reset()
-            done = False
-            episode_reward = 0
-            
-            while not done:
-                action, prob, val = agent.choose_action(observation)
-                observation_, _, done, info = env.step(action)
-                
-                # Use the reward model to get the reward
-                state = torch.tensor([observation], dtype=torch.float).to(agent.reward_model.device)
-                reward = agent.reward_model(state).item()
-                
-                episode_reward += reward
-                
-                agent.store_transition(observation, action, prob, val, reward, done)
-                observation = observation_
-                
-                if done:
-                    agent.learn()
-                    episode_rewards.append(episode_reward)
-        
-        all_rewards.append(episode_rewards)
-    
-    # Plot results
-    mean_rewards = np.mean(all_rewards, axis=0)
-    std_rewards = np.std(all_rewards, axis=0)
-    
-    plt.figure(figsize=(10, 6))
-    plt.plot(mean_rewards, label='Mean Reward')
-    plt.fill_between(range(len(mean_rewards)), 
-                    mean_rewards - std_rewards,
-                    mean_rewards + std_rewards,
-                    alpha=0.2)
-    plt.xlabel('Episode')
-    plt.ylabel('Reward')
-    plt.title(f'PPO-RLHF Training on {env_name}')
-    plt.legend()
-    plt.savefig(f'ppo_rlhf_{env_name}.png')
-    plt.close()
-
 if __name__ == "__main__":
     # Example usage with CartPole
-    env_name = 'CartPole-v1'
-    preference_data_path = 'cartpole_preferences.pkl'
-    train_ppo_rlhf(env_name, preference_data_path) 
+    #env_name = 'CartPole-v1'
+    #preference_data_path = 'cartpole_preferences.pkl'
+    #train_ppo_rlhf(env_name, preference_data_path) 
+	env = gym.make('CartPole-v1')
+	model = PPO(env)
+	model.learn(10000)
