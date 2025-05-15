@@ -1,11 +1,26 @@
 import numpy as np
 
 def generate_trajectories(policy, n_trajectories, env, max_t=int(1000), seed=0, dim_state=4):
+    """
+    Runs multiple trajectories with a specified policy and seed
+    Arguments:
+     - policy, 
+     - n_trajectories, 
+     - env, 
+     - max_t=int(1000), 
+     - seed=0, 
+     - dim_state=4
+    Returns:
+     - trajectories_rewards, [np.array(n_trajectories)]
+     - trajectories_states [np.array((n_trajectories, max_t+int(1), dim_state))]
+    """
     trajectories_states = np.zeros((n_trajectories, max_t+int(1), dim_state))
     trajectories_rewards = np.zeros(n_trajectories)
     for traj_index in range(n_trajectories):
         saved_log_probs = []
         rewards = []
+
+        # start trajectory
         state,_ = env.reset(seed=seed)
         trajectories_states[traj_index,0] = state
         # Collect trajectory

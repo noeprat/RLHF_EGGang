@@ -4,6 +4,13 @@ from collections import deque
 import torch
 
 def reinforce_rwd2go(policy, optimizer, seed, env, early_stop=False, n_episodes=1000, max_t=1000, gamma=1.0, print_every=100):
+    """
+    Implements Reward-to-go and returns only the scores array (not used so far)
+    Arguments:
+     - policy, optimizer, seed, env, early_stop=False, n_episodes=1000, max_t=1000, gamma=1.0, print_every=100
+    Returns:
+     - scores
+    """
     scores_deque = deque(maxlen=100)
     scores = []
     for e in range(1, n_episodes):
@@ -50,7 +57,27 @@ def reinforce_rwd2go(policy, optimizer, seed, env, early_stop=False, n_episodes=
     return scores
 
 
-def reinforce_rwd2go_baseline(policy, optimizer, seed, baseline, env, early_stop=False, n_episodes=1000, max_t=1000, gamma=1.0, print_every=100):
+def reinforce_rwd2go_baseline(policy, optimizer, seed, baseline, env, target_score=100, early_stop=False, n_episodes=1000, max_t=1000, gamma=1.0, print_every=100):
+    """
+    Implements REINFORCE with a specified baseline and returns the scores array, the terminal policy and a checkpoint policy (earning +- 10% of the target score)
+    Arguments:
+     - policy, the initial policy [class(Policy)]
+     - optimizer, the chosen optimizer
+     - seed, [int]
+     - baseline, the baseline function [function]
+     - env, 
+     - target_score = 100, [float]
+     - early_stop=False, 
+     - n_episodes=1000, 
+     - max_t=1000, 
+     - gamma=1.0, 
+     - print_every=100
+    Returns:
+     - scores
+     - max_policy
+     - checkpoint_policy
+    """
+    max_policy_reward = 0
     scores_deque = deque(maxlen=100)
     scores = []
     for e in range(1, n_episodes):
@@ -69,8 +96,9 @@ def reinforce_rwd2go_baseline(policy, optimizer, seed, baseline, env, early_stop
             if done:
                 break
         # Calculate total expected reward
-        scores_deque.append(sum(rewards))
-        scores.append(sum(rewards))
+        policy_reward = sum(rewards)
+        scores_deque.append(policy_reward)
+        scores.append(policy_reward)
 
         # Recalculate the total reward applying discounted factor
         discounts = [gamma ** i for i in range(len(rewards) + 1)]
@@ -96,6 +124,9 @@ def reinforce_rwd2go_baseline(policy, optimizer, seed, baseline, env, early_stop
         if early_stop and np.mean(scores_deque) >= 195.0:
             print('Environment solved in {:d} episodes!\tAverage Score: {:.2f}'.format(e - 100, np.mean(scores_deque)))
             break
-        if np.mean(scores_deque) >= 90 and np.mean(scores_deque) <= 110:
+        if policy_reward >= 0.90*target_score and policy_reward <= 1.10 * target_score:
             checkpoint_policy = policy
-    return scores, policy, checkpoint_policy
+        if policy_reward >= max_policy_reward:
+            max_policy_reward = policy_reward
+            max_policy = policy
+    return scores, max_policy, checkpoint_policy
