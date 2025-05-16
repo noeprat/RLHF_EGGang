@@ -7,7 +7,6 @@ import time
 import numpy as np
 import torch
 import torch.nn as nn
-
 from tqdm import tqdm
 from torch.distributions import MultivariateNormal, Categorical
 import random
@@ -19,12 +18,13 @@ class PPO:
 	"""
 		This is the PPO class we will use as our model in main.py
 	"""
-	def __init__(self, env, **hyperparameters):
+	def __init__(self, env, preference_data, **hyperparameters):
 		"""
 			Initializes the PPO model, including hyperparameters.
 
 			Parameters:
 				env - the environment to train on.
+				preference_data_path - path to the preference data file (optional)
 				hyperparameters - all extra arguments passed into PPO that should be hyperparameters.
 
 			Returns:
@@ -65,6 +65,9 @@ class PPO:
 		self.actor_optim = self.actor.optimizer
 		self.critic_optim = self.critic.optimizer
 
+		# Load preference data if provided
+		self.preference_data = preference_data
+		
 		# This logger will help us with printing out summaries of each iteration
 		self.logger = {
 			'delta_t': time.time_ns(),
@@ -73,6 +76,7 @@ class PPO:
 			'batch_lens': [],       # episodic lengths in batch
 			'batch_rews': [],       # episodic returns in batch
 			'actor_losses': [],     # losses of actor network in current iteration
+			'reward_model_losses': [], # losses of reward model
 		}
 
 	def learn(self, total_timesteps):
@@ -89,11 +93,13 @@ class PPO:
 		print(f"{self.timesteps_per_batch} timesteps per batch for a total of {total_timesteps} timesteps")
 		t_so_far = 0 # Timesteps simulated so far
 		i_so_far = 0 # Iterations ran so far
+		
+		# First train the reward model if we have preference data
+		if self.preference_data is not None:
+			print("\nInitial training of reward model...")
+			self.train_reward_model(self.preference_data, n_epochs=self.reward_model_epochs)
+		
 		while t_so_far < total_timesteps:
-			# Train reward model if we have preference data
-			#if len(self.preference_dataset.preferences) > 0:
-			#	self.train_reward_model()
-			
 			# Collecting our batch simulations
 			batch_obs, batch_acts, batch_log_probs, batch_rtgs, batch_lens = self.rollout()
 
@@ -151,6 +157,7 @@ class PPO:
 				print("Saving model...")
 				torch.save(self.actor.state_dict(), './ppo_actor.pth')
 				torch.save(self.critic.state_dict(), './ppo_critic.pth')
+				torch.save(self.reward_model.state_dict(), './ppo_reward_model.pth')
 
 	def rollout(self):
 		"""
@@ -204,13 +211,19 @@ class PPO:
 				# Calculate action and make a step in the env. 
 				# Note that rew is short for reward.
 				action, log_prob = self.get_action(obs)
-				obs, rew, terminated, truncated, _ = self.env.step(action)
+				#obs, rew, terminated, truncated, _ = self.env.step(action)
+				obs, _, terminated, truncated, _ = self.env.step(action)
+
+				# Replace env reward with reward model prediction
+				obs_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(self.device)
+				with torch.no_grad():
+					r_hat = self.reward_model(obs_tensor).item()
 
 				# Don't really care about the difference between terminated or truncated in this, so just combine them
 				done = terminated | truncated
 
 				# Track recent reward, action, and action log probability
-				ep_rews.append(rew)
+				ep_rews.append(r_hat)
 				batch_acts.append(action)
 				batch_log_probs.append(log_prob)
 
@@ -226,7 +239,7 @@ class PPO:
 		batch_obs = torch.tensor(batch_obs, dtype=torch.float)
 		batch_acts = torch.tensor(batch_acts, dtype=torch.float)
 		batch_log_probs = torch.tensor(batch_log_probs, dtype=torch.float)
-		batch_rtgs = self.compute_rtgs(batch_rews)                                                              # ALG STEP 4
+		batch_rtgs = self.compute_rtgs(batch_rews)
 
 		# Log the episodic returns and episodic lengths in this batch.
 		self.logger['batch_rews'] = batch_rews
@@ -356,9 +369,8 @@ class PPO:
 		self.seed = None                                # Sets the seed of our program, used for reproducibility of results
 
 		# RLHF-specific hyperparameters
-		self.reward_model_lr = 0.0003
-		self.preference_batch_size = 32
-		self.reward_model_epochs = 10
+		self.reward_model_lr = 0.0003                   # Learning rate for reward model
+		self.reward_model_epochs = 10                   # Number of epochs to train reward model
 
 		# Change any default values to custom values for specified hyperparameters
 		for param, value in hyperparameters.items():
@@ -417,6 +429,37 @@ class PPO:
 		self.logger['batch_lens'] = []
 		self.logger['batch_rews'] = []
 		self.logger['actor_losses'] = []
+		self.logger['reward_model_losses'] = []
+
+	def train_reward_model(self, preference_data):
+		"""
+		Train the reward model using the preference dataset
+		"""
+		print(f"Training reward model for {self.reward_model_epochs} epochs...")
+		for epoch in range(self.reward_model_epochs):
+			total_loss = 0
+			
+			for traj1, traj2, preference in preference_data:
+				self.reward_model.optimizer.zero_grad()
+				
+				# Calculate rewards for both trajectories
+				states1 = torch.tensor([s for s, _, _ in traj1], dtype=torch.float).to(self.reward_model.device)
+				states2 = torch.tensor([s for s, _, _ in traj2], dtype=torch.float).to(self.reward_model.device)
+				
+				# Get the reward for each trajectory
+				rewards1 = self.reward_model(states1).mean()
+				rewards2 = self.reward_model(states2).mean()
+				
+				# Calculate preference loss
+				logits = rewards1 - rewards2
+				target = torch.tensor([preference], dtype=torch.float).to(self.reward_model.device)
+				loss = nn.BCEWithLogitsLoss()(logits, target)
+				
+				loss.backward()
+				self.reward_model.optimizer.step()
+				total_loss += loss.item()
+			
+			print(f"Epoch {epoch+1}/{self.reward_model_epochs}, Loss: {total_loss/len(preference_data)}")
 
 if __name__ == "__main__":
     # Example usage with CartPole
