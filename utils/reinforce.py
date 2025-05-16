@@ -2,6 +2,8 @@ import numpy as np
 from collections import deque
 
 import torch
+import os
+PATH = os.path.abspath(os.getcwd())
 
 def reinforce_rwd2go(policy, optimizer, seed, env, early_stop=False, n_episodes=1000, max_t=1000, gamma=1.0, print_every=100):
     """
@@ -57,7 +59,7 @@ def reinforce_rwd2go(policy, optimizer, seed, env, early_stop=False, n_episodes=
     return scores
 
 
-def reinforce_rwd2go_baseline(policy, optimizer, seed, baseline, env, target_score=100, early_stop=False, n_episodes=1000, max_t=1000, gamma=1.0, print_every=100):
+def reinforce_rwd2go_baseline(policy, optimizer, seed, baseline, env, target_score=100, early_stop=False, n_episodes=1000, max_t=1000, gamma=1.0, print_every=100, save_models_every=False):
     """
     Implements REINFORCE with a specified baseline and returns the scores array, the terminal policy and a checkpoint policy (earning +- 10% of the target score)
     Arguments:
@@ -80,7 +82,7 @@ def reinforce_rwd2go_baseline(policy, optimizer, seed, baseline, env, target_sco
     max_policy_reward = 0
     scores_deque = deque(maxlen=100)
     scores = []
-    for e in range(1, n_episodes):
+    for e in range(n_episodes+1):
         saved_log_probs = []
         rewards = []
         baseline_values = []
@@ -121,12 +123,25 @@ def reinforce_rwd2go_baseline(policy, optimizer, seed, baseline, env, target_sco
 
         if e % print_every == 0:
             print('Episode {}\tAverage Score: {:.2f}'.format(e, np.mean(scores_deque)))
+            print('Episode {}\tCurrent Score: {:.2f}'.format(e, policy_reward))
+            if save_models_every:
+                model_path = os.path.join(PATH, 'saved_policies', 'model_{}.pt'.format(e))
+                torch.save(policy.state_dict(), model_path, _use_new_zipfile_serialization=False)
+
+
         if early_stop and np.mean(scores_deque) >= 195.0:
             print('Environment solved in {:d} episodes!\tAverage Score: {:.2f}'.format(e - 100, np.mean(scores_deque)))
             break
+
         if policy_reward >= 0.90*target_score and policy_reward <= 1.10 * target_score:
-            checkpoint_policy = policy
+            model_path = os.path.join(PATH, 'saved_policies', 'model_{}.pt'.format(e))
+            torch.save(policy.state_dict(), model_path, _use_new_zipfile_serialization=False)
+            print('Episode {}\tCurrent Score: {:.2f}'.format(e, policy_reward))
+
         if policy_reward >= max_policy_reward:
             max_policy_reward = policy_reward
-            max_policy = policy
-    return scores, max_policy, checkpoint_policy
+            model_path = os.path.join(PATH, 'saved_policies', 'model_{}.pt'.format(e))
+            torch.save(policy.state_dict(), model_path, _use_new_zipfile_serialization=False)
+            print('Episode {}\tCurrent Score: {:.2f}'.format(e, policy_reward))
+
+    return scores #, max_policy, checkpoint_policy
