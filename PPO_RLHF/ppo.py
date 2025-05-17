@@ -9,12 +9,10 @@ import torch
 import torch.nn as nn
 import os
 
-from tqdm import tqdm
 from torch.distributions import MultivariateNormal, Categorical
-import random
 import matplotlib.pyplot as plt
 
-from models import ActorNetwork, CriticNetwork, RewardModel
+from PPO_RLHF.networks import ActorNetwork, CriticNetwork, RewardModel
 
 class PPO:
 	"""
@@ -358,23 +356,10 @@ class PPO:
 		self.save_freq = 10                             # How often we save in number of iterations
 		self.seed = None                                # Sets the seed of our program, used for reproducibility of results
 
-		# RLHF-specific hyperparameters
-		self.reward_model_lr = 0.0003
-		self.preference_batch_size = 32
-		self.reward_model_epochs = 10
-
 		# Change any default values to custom values for specified hyperparameters
 		for param, value in hyperparameters.items():
 			setattr(self, param, value)
 
-		# Sets the seed if specified
-		if self.seed != None:
-			# Check if our seed is valid first
-			assert(type(self.seed) == int)
-
-			# Set the seed 
-			torch.manual_seed(self.seed)
-			print(f"Successfully set seed to {self.seed}")
 
 	def _log_summary(self):
 		"""
@@ -420,73 +405,3 @@ class PPO:
 		self.logger['batch_lens'] = []
 		self.logger['batch_rews'] = []
 		self.logger['actor_losses'] = []
-
-if __name__ == "__main__":
-    # Example usage with MountainCar
-    env = gym.make('MountainCar-v0')
-    model = PPO(env)
-    model.learn(50000)
-
-    # ---- Load environment and policy ----
-    env = gym.make('MountainCar-v0', render_mode="human")  # 👈 For graphical rendering
-
-    # Handle both discrete and continuous action spaces
-    if isinstance(env.action_space, gym.spaces.Discrete):
-        action_dim = env.action_space.n
-    else:
-        action_dim = env.action_space.shape[0]  # For continuous actions
-    
-    # Set observation dimension from observation space
-    obs_dim = env.observation_space.shape[0]
-
-    actor = ActorNetwork(action_dim, obs_dim, alpha=0.0)
-    models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
-    actor.load_state_dict(torch.load(os.path.join(models_dir, 'ppo_actor.pth')))
-    actor.eval()
-
-    device = actor.device
-
-    # ---- Run evaluation ----
-    n_episodes = 5
-    episode_rewards = []
-
-    for ep in range(n_episodes):
-        obs, _ = env.reset()
-        done = False
-        total_reward = 0
-        frames = []
-
-        while not done:
-            obs_tensor = torch.tensor(obs, dtype=torch.float32).to(device)
-
-            with torch.no_grad():
-                if isinstance(env.action_space, gym.spaces.Discrete):
-                    # For discrete actions, get action probabilities and sample
-                    action_probs = actor(obs_tensor)
-                    dist = Categorical(action_probs)
-                    action = dist.sample()
-                    action = action.item()  # Convert to Python scalar
-                else:
-                    # For continuous actions, get the action directly and clip it
-                    action = actor(obs_tensor)
-                    action = action.cpu().numpy()
-                    action = np.clip(action, env.action_space.low, env.action_space.high)
-
-            obs, reward, terminated, truncated, _ = env.step(action)
-            done = terminated or truncated
-            total_reward += reward
-
-            time.sleep(0.02)  # Slow down rendering for visibility
-
-        episode_rewards.append(total_reward)
-        print(f"Episode {ep+1}: Reward = {total_reward}")
-
-    env.close()
-
-    # ---- Plot reward results ----
-    plt.plot(episode_rewards, marker='o')
-    plt.title("Evaluation: Episode Rewards")
-    plt.xlabel("Episode")
-    plt.ylabel("Total Reward")
-    plt.grid(True)
-    plt.show()

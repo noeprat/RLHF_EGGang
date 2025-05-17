@@ -9,16 +9,16 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 from torch.distributions import MultivariateNormal, Categorical
-import random
-import matplotlib.pyplot as plt
+import os
+import tqdm
 
-from models import ActorNetwork, CriticNetwork, RewardModel
+from .networks import ActorNetwork, CriticNetwork, RewardModel
 
-class PPO:
+class PPORLHF:
 	"""
 		This is the PPO class we will use as our model in main.py
 	"""
-	def __init__(self, env, preference_data, **hyperparameters):
+	def __init__(self, env, preference_data, seed=None, **hyperparameters):
 		"""
 			Initializes the PPO model, including hyperparameters.
 
@@ -31,8 +31,14 @@ class PPO:
 				None
 		"""
 		# Make sure the environment is compatible with our code
-		assert(type(env.observation_space) == gym.spaces.Box)
+		assert(type(env.observation_space) in [gym.spaces.Box, gym.spaces.Discrete])
 		assert(type(env.action_space) in [gym.spaces.Box, gym.spaces.Discrete])
+
+        # Initialize seeds
+		if seed is not None:
+			torch.manual_seed(seed)
+			np.random.seed(seed)
+			self.seed = seed
 
 		# Initialize hyperparameters for training with PPO
 		self._init_hyperparameters(hyperparameters)
@@ -96,8 +102,8 @@ class PPO:
 		
 		# First train the reward model if we have preference data
 		if self.preference_data is not None:
-			print("\nInitial training of reward model...")
-			self.train_reward_model(self.preference_data, n_epochs=self.reward_model_epochs)
+			self.train_reward_model()
+			self.reward_model.eval()
 		
 		while t_so_far < total_timesteps:
 			# Collecting our batch simulations
@@ -152,12 +158,13 @@ class PPO:
 			# Print a summary of our training so far
 			self._log_summary()
 
-			# Save our model if it's time
-			if i_so_far % self.save_freq == 0:
-				print("Saving model...")
-				torch.save(self.actor.state_dict(), './ppo_actor.pth')
-				torch.save(self.critic.state_dict(), './ppo_critic.pth')
-				torch.save(self.reward_model.state_dict(), './ppo_reward_model.pth')
+		# Save models at the end of training
+		print("\nTraining completed. Saving final models...")
+		models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
+		os.makedirs(models_dir, exist_ok=True)
+		torch.save(self.actor.state_dict(), os.path.join(models_dir, 'ppo-rlhf_actor.pth'))
+		torch.save(self.critic.state_dict(), os.path.join(models_dir, 'ppo-rlhf_critic.pth'))
+		print("Models saved successfully!")
 
 	def rollout(self):
 		"""
@@ -211,7 +218,6 @@ class PPO:
 				# Calculate action and make a step in the env. 
 				# Note that rew is short for reward.
 				action, log_prob = self.get_action(obs)
-				#obs, rew, terminated, truncated, _ = self.env.step(action)
 				obs, _, terminated, truncated, _ = self.env.step(action)
 
 				# Replace env reward with reward model prediction
@@ -370,20 +376,11 @@ class PPO:
 
 		# RLHF-specific hyperparameters
 		self.reward_model_lr = 0.0003                   # Learning rate for reward model
-		self.reward_model_epochs = 10                   # Number of epochs to train reward model
+		self.reward_model_epochs = 20                   # Number of epochs to train reward model
 
 		# Change any default values to custom values for specified hyperparameters
 		for param, value in hyperparameters.items():
 			setattr(self, param, value)
-
-		# Sets the seed if specified
-		if self.seed != None:
-			# Check if our seed is valid first
-			assert(type(self.seed) == int)
-
-			# Set the seed 
-			torch.manual_seed(self.seed)
-			print(f"Successfully set seed to {self.seed}")
 
 	def _log_summary(self):
 		"""
@@ -431,20 +428,24 @@ class PPO:
 		self.logger['actor_losses'] = []
 		self.logger['reward_model_losses'] = []
 
-	def train_reward_model(self, preference_data):
+	def train_reward_model(self):
 		"""
 		Train the reward model using the preference dataset
 		"""
 		print(f"Training reward model for {self.reward_model_epochs} epochs...")
-		for epoch in range(self.reward_model_epochs):
+		for epoch in tqdm(range(self.reward_model_epochs)):
 			total_loss = 0
 			
-			for traj1, traj2, preference in preference_data:
+			for traj_pair in self.preference_data:
 				self.reward_model.optimizer.zero_grad()
 				
-				# Calculate rewards for both trajectories
-				states1 = torch.tensor([s for s, _, _ in traj1], dtype=torch.float).to(self.reward_model.device)
-				states2 = torch.tensor([s for s, _, _ in traj2], dtype=torch.float).to(self.reward_model.device)
+				# Extract states from trajectory pairs
+				traj1_states = traj_pair[0][0]
+				traj2_states = traj_pair[1][0]
+				preference = traj_pair[2]
+				# Convert states to tensors
+				states1 = torch.tensor(traj1_states, dtype=torch.float).to(self.reward_model.device)
+				states2 = torch.tensor(traj2_states, dtype=torch.float).to(self.reward_model.device)
 				
 				# Get the reward for each trajectory
 				rewards1 = self.reward_model(states1).mean()
@@ -452,20 +453,11 @@ class PPO:
 				
 				# Calculate preference loss
 				logits = rewards1 - rewards2
+				# Ensure logits has the same shape as target
+				logits = logits.unsqueeze(0)  # Add batch dimension
 				target = torch.tensor([preference], dtype=torch.float).to(self.reward_model.device)
 				loss = nn.BCEWithLogitsLoss()(logits, target)
 				
 				loss.backward()
 				self.reward_model.optimizer.step()
 				total_loss += loss.item()
-			
-			print(f"Epoch {epoch+1}/{self.reward_model_epochs}, Loss: {total_loss/len(preference_data)}")
-
-if __name__ == "__main__":
-    # Example usage with CartPole
-    #env_name = 'CartPole-v1'
-    #preference_data_path = 'cartpole_preferences.pkl'
-    #train_ppo_rlhf(env_name, preference_data_path) 
-	env = gym.make('CartPole-v1')
-	model = PPO(env)
-	model.learn(10000)
