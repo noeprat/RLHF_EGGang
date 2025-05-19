@@ -31,8 +31,8 @@ class PPORLHF:
 				None
 		"""
 		# Make sure the environment is compatible with our code
-		assert(type(env.observation_space) in [gym.spaces.Box, gym.spaces.Discrete])
-		assert(type(env.action_space) in [gym.spaces.Box, gym.spaces.Discrete])
+		#assert(type(env.observation_space) in [gym.spaces.Box, gym.spaces.Discrete])
+		#assert(type(env.action_space) in [gym.spaces.Box, gym.spaces.Discrete])
 
         # Initialize seeds
 		if seed is not None:
@@ -433,30 +433,30 @@ class PPORLHF:
 		Train the reward model using the preference dataset
 		"""
 		print(f"Training reward model for {self.reward_model_epochs} epochs...")
-		for epoch in tqdm(range(self.reward_model_epochs)):
+		for epoch in tqdm.tqdm(range(self.reward_model_epochs)):
 			total_loss = 0
+
+			states, preferred_actions, rejected_actions = self.preference_data
+			dataset_size = states.shape[0]
 			
-			for traj_pair in self.preference_data:
+			for i in range(dataset_size):
 				self.reward_model.optimizer.zero_grad()
 				
 				# Extract states from trajectory pairs
-				traj1_states = traj_pair[0][0]
-				traj2_states = traj_pair[1][0]
-				preference = traj_pair[2]
+				state = states[i]
+				pref_action = preferred_actions[i]
+				rej_action = rejected_actions[i]
 				# Convert states to tensors
-				states1 = torch.tensor(traj1_states, dtype=torch.float).to(self.reward_model.device)
-				states2 = torch.tensor(traj2_states, dtype=torch.float).to(self.reward_model.device)
+				state = torch.tensor(state, dtype=torch.float).to(self.reward_model.device)
+				pref_action = torch.tensor(pref_action, dtype=torch.float).to(self.reward_model.device)
+				rej_action = torch.tensor(rej_action, dtype=torch.float).to(self.reward_model.device)
 				
-				# Get the reward for each trajectory
-				rewards1 = self.reward_model(states1).mean()
-				rewards2 = self.reward_model(states2).mean()
+				# Get the reward for each action
+				rewards_pref = self.reward_model(state, pref_action).mean()
+				rewards_rej = self.reward_model(state, rej_action).mean()
 				
-				# Calculate preference loss
-				logits = rewards1 - rewards2
-				# Ensure logits has the same shape as target
-				logits = logits.unsqueeze(0)  # Add batch dimension
-				target = torch.tensor([preference], dtype=torch.float).to(self.reward_model.device)
-				loss = nn.BCEWithLogitsLoss()(logits, target)
+				# Calculate reward loss
+				loss = - torch.log(torch.sigmoid(rewards_pref - rewards_rej))
 				
 				loss.backward()
 				self.reward_model.optimizer.step()

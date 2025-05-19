@@ -51,7 +51,7 @@ class CriticNetwork(nn.Module):
 
 class RewardModel(nn.Module):
     """
-    Neural network to predict rewards based on state observations
+    Neural network to predict rewards based on state-action observations
     Enhanced with deeper architecture, dropout, and layer normalization
     """
     
@@ -106,12 +106,13 @@ class RewardModel(nn.Module):
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
     
-    def forward(self, state):
+    def forward(self, state, action):
         # Handle batch dimension
-        if len(state.shape) == 1:
-            state = state.unsqueeze(0)
+        input = torch.cat(state, action, 0)
+        if len(input.shape) == 1:
+            input = input.unsqueeze(0)
             
-        x = self.layer1(state)
+        x = self.layer1(input)
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.layer4(x)
