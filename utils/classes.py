@@ -25,3 +25,7 @@ class Policy(nn.Module): # define the policy network
         action = model.sample()
         return action.item(), model.log_prob(action)
     
+    def get_prob(self, state, action):
+        state = torch.from_numpy(state).float().unsqueeze(0).to(device)
+        probs = self.forward(state).cpu()
+        return probs[0, action]
