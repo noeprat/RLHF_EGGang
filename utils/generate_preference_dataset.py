@@ -1,4 +1,8 @@
 import numpy as np
+from classes import Policy
+import torch
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
 
 def generate_trajectories(policy, n_trajectories, env, max_t=int(1000), seed=0, dim_state=4, print_every=10):
     """
@@ -46,3 +50,28 @@ def generate_trajectories(policy, n_trajectories, env, max_t=int(1000), seed=0, 
         if traj_index % print_every == 0:
             print('Trajectory: ', traj_index)
     return trajectories_rewards, trajectories_states, trajectories_actions
+
+
+
+
+def dataset(n_trajectories, max_t, seed, pi1_path, pi2_path, env, dim_state):
+    preferences = np.zeros(n_trajectories)
+
+
+    pi1 = Policy().to(device)
+    pi1.load_state_dict(torch.load(pi1_path, weights_only=True))
+
+    pi2 = Policy().to(device)
+    pi2.load_state_dict(torch.load(pi2_path, weights_only=True))
+
+
+    trajectories_rewards_pi1, trajectories_states_pi1, trajectories_actions_pi1 = generate_trajectories(pi1, n_trajectories, env=env, max_t=max_t, seed = seed, dim_state=dim_state)
+
+    trajectories_rewards_pi2, trajectories_states_pi2, trajectories_actions_pi2 = generate_trajectories(pi2, n_trajectories, env=env, max_t=max_t, seed = seed, dim_state=dim_state)
+
+    preferences = np.exp(trajectories_rewards_pi1 - 500) / (np.exp(trajectories_rewards_pi1-500) + np.exp(trajectories_rewards_pi2-500))
+
+    dataset = [trajectories_states_pi1, trajectories_actions_pi1, trajectories_states_pi2, trajectories_actions_pi2, preferences]
+    return dataset
+
+
