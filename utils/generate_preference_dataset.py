@@ -69,9 +69,27 @@ def dataset(n_trajectories, max_t, seed, pi1_path, pi2_path, env, dim_state):
 
     trajectories_rewards_pi2, trajectories_states_pi2, trajectories_actions_pi2 = generate_trajectories(pi2, n_trajectories, env=env, max_t=max_t, seed = seed, dim_state=dim_state)
 
+    
+
+    return trajectories_states_pi1, trajectories_actions_pi1, trajectories_states_pi2, trajectories_actions_pi2, trajectories_rewards_pi1, trajectories_rewards_pi2
+
+
+def dataset_precumputed_preferences(n_trajectories, max_t, seed, pi1_path, pi2_path, env, dim_state):
+    preferences = np.zeros(n_trajectories)
+
+
+    pi1 = Policy().to(device)
+    pi1.load_state_dict(torch.load(pi1_path, weights_only=True))
+
+    pi2 = Policy().to(device)
+    pi2.load_state_dict(torch.load(pi2_path, weights_only=True))
+
+
+    trajectories_rewards_pi1, trajectories_states_pi1, trajectories_actions_pi1 = generate_trajectories(pi1, n_trajectories, env=env, max_t=max_t, seed = seed, dim_state=dim_state)
+
+    trajectories_rewards_pi2, trajectories_states_pi2, trajectories_actions_pi2 = generate_trajectories(pi2, n_trajectories, env=env, max_t=max_t, seed = seed, dim_state=dim_state)
+
     preferences = np.exp(trajectories_rewards_pi1 - 500) / (np.exp(trajectories_rewards_pi1-500) + np.exp(trajectories_rewards_pi2-500))
 
-    dataset = [trajectories_states_pi1, trajectories_actions_pi1, trajectories_states_pi2, trajectories_actions_pi2, preferences]
-    return dataset
-
+    return trajectories_states_pi1, trajectories_actions_pi1, trajectories_states_pi2, trajectories_actions_pi2, preferences
 
