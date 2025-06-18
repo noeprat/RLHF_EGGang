@@ -51,7 +51,6 @@ class PPO:
 		# Initialize the actor, critic, and reward model
 		self.actor = ActorNetwork(self.action_dim, self.obs_dim, alpha=self.lr)
 		self.critic = CriticNetwork(self.obs_dim, alpha=self.lr)
-		self.reward_model = RewardModel(self.obs_dim, alpha=self.lr)
 		
 		# Get the device from the actor network
 		self.device = self.actor.device
@@ -405,3 +404,6 @@ class PPO:
 		self.logger['batch_lens'] = []
 		self.logger['batch_rews'] = []
 		self.logger['actor_losses'] = []
+
+
+		

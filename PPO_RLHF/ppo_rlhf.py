@@ -10,9 +10,8 @@ import torch.nn as nn
 from tqdm import tqdm
 from torch.distributions import MultivariateNormal, Categorical
 import os
-import tqdm
 
-from .networks import ActorNetwork, CriticNetwork, RewardModel
+from PPO_RLHF.networks import ActorNetwork, CriticNetwork, RewardModel
 
 class PPORLHF:
 	"""
@@ -58,7 +57,7 @@ class PPORLHF:
 		# Initialize the actor, critic, and reward model
 		self.actor = ActorNetwork(self.action_dim, self.obs_dim, alpha=self.lr)
 		self.critic = CriticNetwork(self.obs_dim, alpha=self.lr)
-		self.reward_model = RewardModel(self.obs_dim, alpha=self.lr)
+		self.reward_model = RewardModel(self.obs_dim, self.action_dim, alpha=self.lr)
 		
 		# Get the device from the actor network
 		self.device = self.actor.device
@@ -95,8 +94,7 @@ class PPORLHF:
 			Return:
 				None
 		"""
-		print(f"Learning... Running {self.max_timesteps_per_episode} timesteps per episode, ", end='')
-		print(f"{self.timesteps_per_batch} timesteps per batch for a total of {total_timesteps} timesteps")
+		print(f"Learning... Running {total_timesteps} timesteps ...")
 		t_so_far = 0 # Timesteps simulated so far
 		i_so_far = 0 # Iterations ran so far
 		
@@ -164,7 +162,6 @@ class PPORLHF:
 		os.makedirs(models_dir, exist_ok=True)
 		torch.save(self.actor.state_dict(), os.path.join(models_dir, 'ppo-rlhf_actor.pth'))
 		torch.save(self.critic.state_dict(), os.path.join(models_dir, 'ppo-rlhf_critic.pth'))
-		print("Models saved successfully!")
 
 	def rollout(self):
 		"""
@@ -206,9 +203,6 @@ class PPORLHF:
 
 			# Run an episode for a maximum of max_timesteps_per_episode timesteps
 			for ep_t in range(self.max_timesteps_per_episode):
-				# If render is specified, render the environment
-				if self.render and (self.logger['i_so_far'] % self.render_every_i == 0) and len(batch_lens) == 0:
-					self.env.render()
 
 				t += 1 # Increment timesteps ran this batch so far
 
@@ -222,9 +216,17 @@ class PPORLHF:
 
 				# Replace env reward with reward model prediction
 				obs_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(self.device)
+				if isinstance(self.env.action_space, gym.spaces.Discrete):
+					# One-hot encode discrete action
+					action_onehot = np.eye(self.action_dim)[int(action)]
+					action_tensor = torch.tensor(action_onehot, dtype=torch.float32).unsqueeze(0).to(self.device)
+				else:
+					# Use continuous action as is
+					action_tensor = torch.tensor(action, dtype=torch.float32).unsqueeze(0).to(self.device)
 				with torch.no_grad():
-					r_hat = self.reward_model(obs_tensor).item()
-
+					r_hat = self.reward_model(obs_tensor, action_tensor).item()
+				# Scale reward using tanh to prevent extreme values while preserving sign
+				r_hat = torch.tanh(torch.tensor(r_hat)).item()
 				# Don't really care about the difference between terminated or truncated in this, so just combine them
 				done = terminated | truncated
 
@@ -236,16 +238,15 @@ class PPORLHF:
 				# If the environment tells us the episode is terminated, break
 				if done:
 					break
-
 			# Track episodic lengths and rewards
 			batch_lens.append(ep_t + 1)
 			batch_rews.append(ep_rews)
 
 		# Reshape data as tensors in the shape specified in function description, before returning
-		batch_obs = torch.tensor(batch_obs, dtype=torch.float)
-		batch_acts = torch.tensor(batch_acts, dtype=torch.float)
-		batch_log_probs = torch.tensor(batch_log_probs, dtype=torch.float)
-		batch_rtgs = self.compute_rtgs(batch_rews)
+		batch_obs = torch.tensor(batch_obs, dtype=torch.float).to(self.device)
+		batch_acts = torch.tensor(batch_acts, dtype=torch.float).to(self.device)
+		batch_log_probs = torch.tensor(batch_log_probs, dtype=torch.float).to(self.device)
+		batch_rtgs = self.compute_rtgs(batch_rews).to(self.device)
 
 		# Log the episodic returns and episodic lengths in this batch.
 		self.logger['batch_rews'] = batch_rews
@@ -298,7 +299,9 @@ class PPORLHF:
 		obs = torch.tensor(obs, dtype=torch.float).to(self.device)
 		
 		# Query the actor network for action probabilities
+		self.actor.eval()
 		action_probs = self.actor(obs)
+		self.actor.train()
 		
 		if isinstance(self.env.action_space, gym.spaces.Discrete):
 			# For discrete action spaces
@@ -329,11 +332,17 @@ class PPORLHF:
 				V - the predicted values of batch_obs
 				log_probs - the log probabilities of the actions taken in batch_acts given batch_obs
 		"""
-		# Query critic network for a value V for each batch_obs. Shape of V should be same as batch_rtgs
+		batch_obs = batch_obs.to(self.device)
+  
+    # Query critic network for a value V for each batch_obs. Shape of V should be same as batch_rtgs
+		self.critic.eval()
 		V = self.critic(batch_obs).squeeze()
+		self.critic.train()
 
 		# Calculate the log probabilities of batch actions using most recent actor network.
+		self.actor.eval()
 		action_probs = self.actor(batch_obs)
+		self.actor.train()
 		
 		if isinstance(self.env.action_space, gym.spaces.Discrete):
 			# For discrete action spaces
@@ -369,14 +378,12 @@ class PPORLHF:
 		self.clip = 0.2                                 # Recommended 0.2, helps define the threshold to clip the ratio during SGA
 
 		# Miscellaneous parameters
-		self.render = True                              # If we should render during rollout
-		self.render_every_i = 10                        # Only render every n iterations
 		self.save_freq = 10                             # How often we save in number of iterations
 		self.seed = None                                # Sets the seed of our program, used for reproducibility of results
 
 		# RLHF-specific hyperparameters
 		self.reward_model_lr = 0.0003                   # Learning rate for reward model
-		self.reward_model_epochs = 20                   # Number of epochs to train reward model
+		self.reward_model_epochs = 30                   # Number of epochs to train reward model
 
 		# Change any default values to custom values for specified hyperparameters
 		for param, value in hyperparameters.items():
@@ -404,7 +411,7 @@ class PPORLHF:
 		i_so_far = self.logger['i_so_far']
 		avg_ep_lens = np.mean(self.logger['batch_lens'])
 		avg_ep_rews = np.mean([np.sum(ep_rews) for ep_rews in self.logger['batch_rews']])
-		avg_actor_loss = np.mean([losses.float().mean() for losses in self.logger['actor_losses']])
+		avg_actor_loss = np.mean([losses.cpu().float().mean().item() for losses in self.logger['actor_losses']])
 
 		# Round decimal places for more aesthetic logging messages
 		avg_ep_lens = str(round(avg_ep_lens, 2))
@@ -412,15 +419,15 @@ class PPORLHF:
 		avg_actor_loss = str(round(avg_actor_loss, 5))
 
 		# Print logging statements
-		print(flush=True)
-		print(f"-------------------- Iteration #{i_so_far} --------------------", flush=True)
-		print(f"Average Episodic Length: {avg_ep_lens}", flush=True)
-		print(f"Average Episodic Return: {avg_ep_rews}", flush=True)
-		print(f"Average Loss: {avg_actor_loss}", flush=True)
-		print(f"Timesteps So Far: {t_so_far}", flush=True)
-		print(f"Iteration took: {delta_t} secs", flush=True)
-		print(f"------------------------------------------------------", flush=True)
-		print(flush=True)
+		#print(flush=True)
+		#print(f"-------------------- Iteration #{i_so_far} --------------------", flush=True)
+		#print(f"Average Episodic Length: {avg_ep_lens}", flush=True)
+		#print(f"Average Episodic Return: {avg_ep_rews}", flush=True)
+		#print(f"Average Loss: {avg_actor_loss}", flush=True)
+		#print(f"Timesteps So Far: {t_so_far}", flush=True)
+		#print(f"Iteration took: {delta_t} secs", flush=True)
+		#print(f"------------------------------------------------------", flush=True)
+		#print(flush=True)
 
 		# Reset batch-specific logging data
 		self.logger['batch_lens'] = []
@@ -432,32 +439,150 @@ class PPORLHF:
 		"""
 		Train the reward model using the preference dataset
 		"""
+		self.reward_model.train()
 		print(f"Training reward model for {self.reward_model_epochs} epochs...")
+		
+		# Split data into train and validation sets (80-20 split)
+		n_samples = len(self.preference_data)
+		indices = np.random.permutation(n_samples)
+		train_size = int(0.8 * n_samples)
+		train_indices = indices[:train_size]
+		val_indices = indices[train_size:]
+		
+		# Create batches
+		batch_size = 32
+		n_batches = (train_size + batch_size - 1) // batch_size
+		
+		best_val_loss = float('inf')
+		patience = 5
+		patience_counter = 0
+		
 		for epoch in tqdm(range(self.reward_model_epochs)):
-			total_loss = 0
+			total_train_loss = 0
+			total_val_loss = 0
 			
-			for traj_pair in self.preference_data:
+			# Training
+			self.reward_model.train()
+			for batch_idx in range(n_batches):
+				start_idx = batch_idx * batch_size
+				end_idx = min((batch_idx + 1) * batch_size, train_size)
+				batch_indices = train_indices[start_idx:end_idx]
+				
 				self.reward_model.optimizer.zero_grad()
+				batch_loss = 0
 				
-				# Extract states from trajectory pairs
-				traj1_states = traj_pair[0][0]
-				traj2_states = traj_pair[1][0]
-				preference = traj_pair[2]
-				# Convert states to tensors
-				states1 = torch.tensor(traj1_states, dtype=torch.float).to(self.reward_model.device)
-				states2 = torch.tensor(traj2_states, dtype=torch.float).to(self.reward_model.device)
+				for idx in batch_indices:
+					traj_pair = self.preference_data[idx]
+					traj1_states, traj1_actions = traj_pair[0]  # Tuple of (states, actions) arrays
+					traj2_states, traj2_actions = traj_pair[1]  # Tuple of (states, actions) arrays
+					preference = traj_pair[2]
+					
+					# Convert states and actions to tensors
+					states1 = torch.tensor(traj1_states, dtype=torch.float).to(self.reward_model.device)
+					actions1 = np.array(traj1_actions)
+					if isinstance(self.env.action_space, gym.spaces.Discrete):
+						if actions1.ndim == 1:
+							actions1 = actions1.astype(int)
+							actions1 = np.eye(self.action_dim)[actions1]
+					else:
+						if actions1.ndim == 1:
+							actions1 = actions1[:, None]  # Ensure shape [T, action_dim]
+					actions1 = torch.tensor(actions1, dtype=torch.float32).to(self.reward_model.device)
+					
+					states2 = torch.tensor(traj2_states, dtype=torch.float).to(self.reward_model.device)
+					actions2 = np.array(traj2_actions)
+					if isinstance(self.env.action_space, gym.spaces.Discrete):
+						if actions2.ndim == 1:
+							actions2 = actions2.astype(int)
+							actions2 = np.eye(self.action_dim)[actions2]
+					else:
+						if actions2.ndim == 1:
+							actions2 = actions2[:, None]  # Ensure shape [T, action_dim]
+					actions2 = torch.tensor(actions2, dtype=torch.float32).to(self.reward_model.device)
+					
+					# Get rewards for each trajectory
+					rewards1 = self.reward_model(states1, actions1).mean()
+					rewards2 = self.reward_model(states2, actions2).mean()
+					
+					# Scale rewards to prevent extreme values
+					rewards1 = torch.tanh(rewards1)
+					rewards2 = torch.tanh(rewards2)
+					
+					# Calculate preference loss
+					logits = rewards1 - rewards2
+					logits = logits.unsqueeze(0)
+					target = torch.tensor([preference], dtype=torch.float).to(self.reward_model.device)
+					loss = nn.BCEWithLogitsLoss()(logits, target)
+					batch_loss += loss
 				
-				# Get the reward for each trajectory
-				rewards1 = self.reward_model(states1).mean()
-				rewards2 = self.reward_model(states2).mean()
+				# Average loss over batch
+				batch_loss = batch_loss / len(batch_indices)
+				batch_loss.backward()
 				
-				# Calculate preference loss
-				logits = rewards1 - rewards2
-				# Ensure logits has the same shape as target
-				logits = logits.unsqueeze(0)  # Add batch dimension
-				target = torch.tensor([preference], dtype=torch.float).to(self.reward_model.device)
-				loss = nn.BCEWithLogitsLoss()(logits, target)
+				# Gradient clipping
+				torch.nn.utils.clip_grad_norm_(self.reward_model.parameters(), max_norm=1.0)
 				
-				loss.backward()
 				self.reward_model.optimizer.step()
-				total_loss += loss.item()
+				total_train_loss += batch_loss.item()
+			
+			# Validation
+			self.reward_model.eval()
+			with torch.no_grad():
+				for idx in val_indices:
+					traj_pair = self.preference_data[idx]
+					traj1_states, traj1_actions = traj_pair[0]
+					traj2_states, traj2_actions = traj_pair[1]
+					preference = traj_pair[2]
+					
+					# Convert states and actions to tensors
+					states1 = torch.tensor(traj1_states, dtype=torch.float).to(self.reward_model.device)
+					actions1 = np.array(traj1_actions)
+					if isinstance(self.env.action_space, gym.spaces.Discrete):
+						if actions1.ndim == 1:
+							actions1 = actions1.astype(int)
+							actions1 = np.eye(self.action_dim)[actions1]
+					else:
+						if actions1.ndim == 1:
+							actions1 = actions1[:, None]
+					actions1 = torch.tensor(actions1, dtype=torch.float32).to(self.reward_model.device)
+					
+					states2 = torch.tensor(traj2_states, dtype=torch.float).to(self.reward_model.device)
+					actions2 = np.array(traj2_actions)
+					if isinstance(self.env.action_space, gym.spaces.Discrete):
+						if actions2.ndim == 1:
+							actions2 = actions2.astype(int)
+							actions2 = np.eye(self.action_dim)[actions2]
+					else:
+						if actions2.ndim == 1:
+							actions2 = actions2[:, None]
+					actions2 = torch.tensor(actions2, dtype=torch.float32).to(self.reward_model.device)
+					
+					# Get rewards for each trajectory
+					rewards1 = self.reward_model(states1, actions1).mean()
+					rewards2 = self.reward_model(states2, actions2).mean()
+					
+					# Scale rewards
+					rewards1 = torch.tanh(rewards1)
+					rewards2 = torch.tanh(rewards2)
+					
+					logits = rewards1 - rewards2
+					logits = logits.unsqueeze(0)
+					target = torch.tensor([preference], dtype=torch.float).to(self.reward_model.device)
+					loss = nn.BCEWithLogitsLoss()(logits, target)
+					total_val_loss += loss.item()
+			
+			# Calculate average losses
+			avg_train_loss = total_train_loss / n_batches
+			avg_val_loss = total_val_loss / len(val_indices)
+			
+			# Early stopping
+			if avg_val_loss < best_val_loss:
+				best_val_loss = avg_val_loss
+				patience_counter = 0
+			else:
+				patience_counter += 1
+				if patience_counter >= patience:
+					print(f"Early stopping at epoch {epoch + 1}")
+					break			
+			if (epoch + 1) % 5 == 0:
+				print(f"Epoch {epoch + 1}: Train Loss = {avg_train_loss:.4f}, Val Loss = {avg_val_loss:.4f}")

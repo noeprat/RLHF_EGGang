@@ -48,71 +48,40 @@ class CriticNetwork(nn.Module):
     def forward(self, state):
         return self.critic(state)
 	
-
 class RewardModel(nn.Module):
     """
-    Neural network to predict rewards based on state observations
-    Enhanced with deeper architecture, dropout, and layer normalization
+    Neural network to predict rewards based on state and action.
     """
-    
-    def __init__(self, input_dims, alpha):
+    def __init__(self, state_dim, action_dim, alpha):
         super(RewardModel, self).__init__()
-        
-        # First layer with layer normalization
-        self.layer1 = nn.Sequential(
-            nn.Linear(input_dims, 128),
-            nn.LayerNorm(128),
+        input_dim = state_dim + action_dim
+        self.network = nn.Sequential(
+            nn.Linear(input_dim, 64),
+            nn.BatchNorm1d(64),
             nn.ReLU(),
-            nn.Dropout(0.2)
-        )
-        
-        # Second layer with layer normalization
-        self.layer2 = nn.Sequential(
-            nn.Linear(128, 256),
-            nn.LayerNorm(256),
+            nn.Dropout(0.2),
+            nn.Linear(64, 32),
+            nn.BatchNorm1d(32),
             nn.ReLU(),
-            nn.Dropout(0.2)
+            nn.Dropout(0.2),
+            nn.Linear(32, 1)
         )
-        
-        # Third layer with layer normalization
-        self.layer3 = nn.Sequential(
-            nn.Linear(256, 128),
-            nn.LayerNorm(128),
-            nn.ReLU(),
-            nn.Dropout(0.2)
-        )
-        
-        # Fourth layer with layer normalization
-        self.layer4 = nn.Sequential(
-            nn.Linear(128, 64),
-            nn.LayerNorm(64),
-            nn.ReLU(),
-            nn.Dropout(0.1)
-        )
-        
-        # Output layer
-        self.output = nn.Linear(64, 1)
-        
-        # Initialize weights using Xavier initialization
         self.apply(self._init_weights)
-        
-        self.optimizer = optim.Adam(self.parameters(), lr=alpha, weight_decay=1e-5)  # Added L2 regularization
+        self.optimizer = optim.Adam(self.parameters(), lr=alpha, weight_decay=1e-4)
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         self.to(self.device)
-    
+
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
             nn.init.xavier_uniform_(module.weight)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
-    
-    def forward(self, state):
-        # Handle batch dimension
+
+    def forward(self, state, action):
+        # state: (batch, state_dim), action: (batch, action_dim)
         if len(state.shape) == 1:
             state = state.unsqueeze(0)
-            
-        x = self.layer1(state)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.layer4(x)
-        return self.output(x)
+        if len(action.shape) == 1:
+            action = action.unsqueeze(0)
+        x = torch.cat([state, action], dim=-1)
+        return self.network(x)
